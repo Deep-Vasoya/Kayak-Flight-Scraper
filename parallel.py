@@ -9,12 +9,12 @@ from datetime import datetime, timedelta
 import random
 import time
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import (NoSuchElementException,
-                                        TimeoutException,
-                                        WebDriverException)
+from selenium.common.exceptions import (NoSuchElementException, TimeoutException, WebDriverException)
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Alignment, Font, Border, Side
+import threading
+from queue import Queue
 
 app = Flask(__name__)
 
@@ -122,25 +122,23 @@ def handle_possible_blocking(driver, current_url):
     return False, driver
 
 
-def scrape_flight_data(driver, search_params):
-    """Scrape flight data with blocking recovery based on user input"""
-    departure_airport = search_params['departure_airport']
-    arrival_airport = search_params['arrival_airport']
-    date_from_str = search_params['date_from']
-    date_to_str = search_params['date_to']
-    nights = int(search_params['nights'])
-    stops = search_params['stops']
-    flight_hours = int(search_params['flight_hours'])
-    country = search_params.get('country', 'USA')  # Default to USA if not provided
-    departure_airport_optional = search_params.get('departure_airport_optional')
-    arrival_airport_optional = search_params.get('arrival_airport_optional')
-
+def scrape_flight_data_interval(driver_queue, results_queue, search_params, start_date):
+    """Scrape flight data for a specific interval."""
     try:
-        departure_date = datetime.strptime(date_from_str, '%Y-%m-%d').date()
-        return_date = departure_date + timedelta(days=nights)
-        return_date_str = return_date.strftime('%Y-%m-%d')
+        driver = driver_queue.get()
+        nights = int(search_params['nights'])
+        end_date_interval = start_date + timedelta(days=nights)
+        date_from_str = start_date.strftime('%Y-%m-%d')
+        date_to_str = end_date_interval.strftime('%Y-%m-%d')
 
+        departure_airport = search_params['departure_airport']
+        arrival_airport = search_params['arrival_airport']
         stops = search_params['stops']
+        flight_hours = int(search_params['flight_hours'])
+        country = search_params.get('country', 'USA')
+        departure_airport_optional = search_params.get('departure_airport_optional')
+        arrival_airport_optional = search_params.get('arrival_airport_optional')
+
         stops_param = ""
         if stops:
             stops_list = []
@@ -149,7 +147,6 @@ def scrape_flight_data(driver, search_params):
             for stop in stops:
                 if stop.isdigit() and stop != '0':
                     stops_list.append(stop)
-
             if stops_list:
                 stops_param = ";stops=" + ",".join(stops_list)
 
@@ -157,22 +154,20 @@ def scrape_flight_data(driver, search_params):
         if country == 'Canada':
             base_url = "https://www.ca.kayak.com/flights"
 
-        url = f"{base_url}/{departure_airport}-{arrival_airport}/{date_from_str}/{return_date_str}/2adults?sort=price_a&fs=legdur<={flight_hours * 60}{stops_param};virtualinterline=-virtualinterline;airportchange=-airportchange"
+        url = f"{base_url}/{departure_airport}-{arrival_airport}/{date_from_str}/{date_to_str}/2adults?sort=price_a&fs=legdur<={flight_hours * 60}{stops_param};virtualinterline=-virtualinterline;airportchange=-airportchange"
         if country in ['USA', 'Canada'] and departure_airport_optional and arrival_airport_optional:
-            url = f"{base_url}/{departure_airport}-{arrival_airport}/{date_from_str}/{departure_airport_optional}-{arrival_airport_optional}/{return_date_str}/2adults?sort=price_a&fs=legdur<={flight_hours * 60}{stops_param};virtualinterline=-virtualinterline;airportchange=-airportchange"
+            url = f"{base_url}/{departure_airport}-{arrival_airport}/{date_from_str}/{departure_airport_optional}-{arrival_airport_optional}/{date_to_str}/2adults?sort=price_a&fs=legdur<={flight_hours * 60}{stops_param};virtualinterline=-virtualinterline;airportchange=-airportchange"
 
-        print(f"🌐 Accessing: {url}")
+        print(f"[Thread {threading.get_ident()}] Accessing: {url}")
         driver.get(url)
         random_delay(1, 2)
         human_like_interaction(driver)
 
-        # Check for blocking
         blocked, driver = handle_possible_blocking(driver, url)
         if blocked:
-            print("🔄 Retrying after block resolution...")
+            print(f"[Thread {threading.get_ident()}] Retrying after block resolution for {date_from_str}...")
             random_delay(5, 10)
 
-        # Wait for results
         try:
             WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'nrc6')]")))
@@ -181,26 +176,26 @@ def scrape_flight_data(driver, search_params):
                 WebDriverWait(driver, 15).until(
                     EC.presence_of_element_located((By.XPATH, "//div[contains(text(), 'prices')]")))
             except:
-                print("❌ Timed out waiting for flight results")
-                return None, driver
+                print(f"[Thread {threading.get_ident()}] Timed out waiting for flight results for {date_from_str}")
+                driver_queue.put(driver)
+                return
 
-        # Human-like scrolling
-        for _ in range(3):
-            scroll_amount = random.randint(300, 700)
+        for _ in range(2):
+            scroll_amount = random.randint(200, 500)
             driver.execute_script(f"window.scrollBy(0, {scroll_amount})")
             random_delay(1, 2)
 
         flights = driver.find_elements(By.XPATH, "//div[contains(@class, 'nrc6')]")
         if not flights:
-            print("❌ No flights found on page")
-            return None, driver
+            print(f"[Thread {threading.get_ident()}] No flights found on page for {date_from_str}")
+            driver_queue.put(driver)
+            return
 
         flight = flights[0]
         driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth'});", flight)
         random_delay(1, 2)
 
         def safe_extract(xpath, default="Unknown"):
-            """Try extracting text from an element, return default if missing"""
             try:
                 text = flight.find_element(By.XPATH, xpath).text.strip()
                 return text.replace('$', '').replace(',', '').strip()
@@ -211,9 +206,9 @@ def scrape_flight_data(driver, search_params):
         duration1 = duration_elements[0].text.strip() if len(duration_elements) > 0 else "Unknown"
         duration2 = duration_elements[1].text.strip() if len(duration_elements) > 1 else "Unknown"
 
-        month_name = departure_date.strftime('%B')  # MARK: Get the full month name
-        formatted_month = month_name[:3]  # MARK: Take first 3 letters of month
-        formatted_date = f"{departure_date.day:02d}-{formatted_month}-{str(departure_date.year)[-2:]}"
+        month_name = start_date.strftime('%B')
+        formatted_month = month_name[:3]
+        formatted_date = f"{start_date.day:02d}-{formatted_month}-{str(start_date.year)[-2:]}"
 
         price_xpath = ".//div[contains(@class, 'e2GB-price-text-container')]/div[contains(@class, 'e2GB-price-text')]"
         airline_xpath = ".//div[contains(@class, 'J0g6-operator-text')]"
@@ -222,10 +217,9 @@ def scrape_flight_data(driver, search_params):
 
         price_text = safe_extract(price_xpath)
         if country == 'Canada':
-            price_text = price_text.replace('C ', '') # Remove 'C ' for Canadian prices
+            price_text = price_text.replace('C ', '')
         airline = safe_extract(airline_xpath)
 
-        # Construct the Arrival Airport string for the Excel output
         excel_arrival_airport = arrival_airport
         if departure_airport_optional and arrival_airport_optional:
             excel_arrival_airport = f"{arrival_airport} x {arrival_airport_optional}"
@@ -241,13 +235,15 @@ def scrape_flight_data(driver, search_params):
             'Arrival Time': duration2
         }
 
-        print(f"✅ Found flight: {flight_data['Airline']} for {flight_data['Price']}")
-        print(f"Found flight data: {flight_data}")
-        return flight_data, driver
+        print(f"[Thread {threading.get_ident()}] Found flight: {flight_data['Airline']} for {flight_data['Price']} on {formatted_date}")
+        results_queue.put(flight_data)
+
+        driver_queue.put(driver)
 
     except Exception as e:
-        print(f"❌ Error scraping for {date_from_str}: {str(e)}")
-        return None, driver
+        print(f"[Thread {threading.get_ident()}] Error scraping interval starting {start_date}: {e}")
+        if driver:
+            driver_queue.put(driver)
 
 
 @app.route('/', methods=['GET', 'POST'])
@@ -259,8 +255,8 @@ def index():
     if request.method == 'POST':
         departure_airport = request.form['departure_airport']
         arrival_airport = request.form['arrival_airport']
-        date_from = request.form['date_from']
-        date_to = request.form['date_to']
+        date_from_str = request.form['date_from']
+        date_to_str = request.form['date_to']
         nights = int(request.form['nights'])
         stops = request.form.getlist('stops')
         flight_hours = int(request.form['flight_hours'])
@@ -271,8 +267,8 @@ def index():
         search_params = {
             'departure_airport': departure_airport,
             'arrival_airport': arrival_airport,
-            'date_from': date_from,
-            'date_to': date_to,
+            'date_from': date_from_str,
+            'date_to': date_to_str,
             'nights': nights,
             'stops': stops,
             'flight_hours': flight_hours,
@@ -284,89 +280,92 @@ def index():
         print(f"Form Data: {search_params}")
 
         all_flights = []
-        driver = setup_driver()
+        start_date = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+        end_date_user = datetime.strptime(date_to_str, '%Y-%m-%d').date()
 
-        if driver:
+        interval_starts = []
+        current_date = start_date
+        while current_date <= end_date_user:
+            interval_starts.append(current_date)
+            current_date += timedelta(days=1)
+
+        num_threads = min(5, len(interval_starts))  # Limit to 5 threads or the number of intervals
+        driver_queue = Queue(maxsize=num_threads)
+        for _ in range(num_threads):
+            driver_queue.put(setup_driver())
+        results_queue = Queue()
+        threads = []
+
+        for start_interval in interval_starts:
+            thread = threading.Thread(target=scrape_flight_data_interval,
+                                      args=(driver_queue, results_queue, search_params, start_interval))
+            threads.append(thread)
+            threads[-1].start()  # Start the newly added thread
+            while len(threading.enumerate()) - threading.active_count() > num_threads + 1: # +1 for the main thread
+                time.sleep(0.1)  # Briefly wait if too many threads are running
+
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
+
+        while not results_queue.empty():
+            flight_data = results_queue.get()
+            if flight_data:
+                all_flights.append(flight_data)
+
+        # Quit all drivers
+        while not driver_queue.empty():
             try:
-                start_date = datetime.strptime(date_from, '%Y-%m-%d').date()
-                end_date = datetime.strptime(date_to, '%Y-%m-%d').date()
-                current_date = start_date
-
-                while current_date <= end_date:
-                    delay = random.uniform(1.5, 4.5)
-                    print(f"⏳ Waiting {delay:.1f} seconds before next search...")
-                    time.sleep(delay)
-
-                    current_search_params = search_params.copy()
-                    current_search_params['date_from'] = current_date.strftime('%Y-%m-%d')
-                    current_search_params['date_to'] = (current_date + timedelta(days=nights)).strftime('%Y-%m-%d')
-
-                    flight_data, driver = scrape_flight_data(driver, current_search_params)
-                    if flight_data:
-                        all_flights.append(flight_data)
-
-                    current_date += timedelta(days=1)
-
-                    if random.random() > 0.7:
-                        human_like_interaction(driver)
-
-                print(f"Number of flights found: {len(all_flights)}")
-
-                if all_flights:
-                    # Save to Excel using openpyxl for formatting
-                    df = pd.DataFrame(all_flights)
-                    df['Date'] = pd.to_datetime(df['Date'], format='%d-%b-%y')
-                    output_file = "kayak_flights_results(Testing).xlsx"
-
-                    wb = Workbook()
-                    ws = wb.active
-
-                    # Define border style
-                    thin_border = Border(left=Side(style='thin'),
-                                         right=Side(style='thin'),
-                                         top=Side(style='thin'),
-                                         bottom=Side(style='thin'))
-
-                    for r_idx, row in enumerate(dataframe_to_rows(df, header=True, index=False)):
-                        ws.append(row)
-                        for c_idx, cell in enumerate(ws[r_idx + 1]):
-                            cell.alignment = Alignment(horizontal='center')
-                            cell.border = thin_border
-                            if r_idx == 0:
-                                cell.font = Font(bold=True)
-
-                    # Format the Date column to display as DD-MMM-YY
-                    date_column = ws['A']
-                    for cell in date_column:
-                        cell.number_format = 'DD-MMM-YY'
-
-                    wb.save(output_file)
-                    print(f"💾 Saved results to {output_file}")
-                    return render_template('results.html', output_file=output_file)
-                else:
-                    return render_template('results.html')
-
+                driver = driver_queue.get()
+                driver.quit()
             except Exception as e:
-                print(f"❌ An error occurred: {e}")
-                return render_template('results.html', error=str(e))
-            finally:
-                if driver:
-                    try:
-                        driver.quit()
-                    except Exception as e:
-                        print(f"Error while closing WebDriver: {e}")
+                print(f"Error quitting driver: {e}")
+
+        print(f"Total number of flights found across all intervals: {len(all_flights)}")
+
+        if all_flights:
+            # Save to Excel
+            df = pd.DataFrame(all_flights)
+            df['Date'] = pd.to_datetime(df['Date'], format='%d-%b-%y')
+            output_file = f"kayak_flights{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+            wb = Workbook()
+            ws = wb.active
+            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+            for r_idx, row in enumerate(dataframe_to_rows(df, header=True, index=False)):
+                ws.append(row)
+                for c_idx, cell in enumerate(ws[r_idx + 1]):
+                    cell.alignment = Alignment(horizontal='center')
+                    cell.border = thin_border
+                    if r_idx == 0:
+                        cell.font = Font(bold=True)
+
+            date_column = ws['A']
+            for cell in date_column:
+                cell.number_format = 'DD-MMM-YY'
+
+            wb.save(output_file)
+            print(f"💾 Saved parallel results to {output_file}")
+            return render_template('results.html', output_file=output_file)
         else:
-            return "Failed to setup driver."
+            return render_template('results.html')
 
     return render_template('index.html', usa_airports=usa_airports, canada_airports=canada_airports, selected_country=selected_country)
 
 @app.route('/download_results')
 def download_results():
-    output_file = "kayak_flights_results(Testing).xlsx"
-    try:
-        return send_file(output_file, as_attachment=True, download_name=output_file)
-    except FileNotFoundError:
-        return "Error: Results file not found."
+    import os
+    files = [f for f in os.listdir('.') if f.startswith('kayak_flights')]
+    if files:
+        latest_file = max(files, key=os.path.getctime)
+        try:
+            return send_file(latest_file, as_attachment=True, download_name=latest_file)
+        except FileNotFoundError:
+            return "Error: Results file not found."
+    else:
+        return "Error: No results file found."
+
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0')

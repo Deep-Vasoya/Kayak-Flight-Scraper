@@ -7,13 +7,38 @@
       href="{{ url_for('static', filename='favicon.ico') }}"
       type="image/x-icon"
     />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Julius+Sans+One&display=swap"
+      rel="stylesheet"
+    />
     <style>
       /* Your existing CSS styles */
       body {
-        font-family: sans-serif;
+        font-family: Julius Sans One, sans-serif;
         margin: 20px;
         background-color: #f4f4f4;
         color: #333;
+      }
+
+      h1,
+      h2,
+      h3,
+      h4,
+      h5,
+      h6,
+      p,
+      a,
+      label,
+      button,
+      input,
+      select,
+      textarea,
+      li,
+      span,
+      div {
+        font-family: Julius Sans One, sans-serif;
       }
 
       .header-container {
@@ -178,6 +203,36 @@
         background-color: #8e2157;
         color: white;
         border-color: #8e2157;
+      }
+
+      /* --- Styles for Larger Radio Buttons --- */
+      input[type="radio"] {
+        width: 20px; /* Increased size */
+        height: 20px; /* Increased size */
+        border-width: 2px; /* Thicker border */
+      }
+
+      input[type="radio"]:checked::before {
+        width: 12px; /* Adjust the size of the inner circle */
+        height: 12px; /* Adjust the size of the inner circle */
+      }
+
+      /* --- Styles for Larger Checkboxes --- */
+      input[type="checkbox"] {
+        width: 20px; /* Increased size */
+        height: 20px; /* Increased size */
+        border-width: 2px; /* Thicker border */
+      }
+
+      .stops-group input[type="checkbox"] {
+        /* Apply to the stops group specifically */
+        width: 20px;
+        height: 20px;
+        border-width: 2px;
+      }
+
+      .stops-group input[type="checkbox"]:checked::before {
+        font-size: 16px; /* Larger checkmark */
       }
     </style>
     <script>
@@ -415,7 +470,7 @@
         <input type="checkbox" name="stops" value="1" /> 1 Stop
         <input type="checkbox" name="stops" value="2" /> 2 Stops
       </div>
-      <button type="submit">Scrape Flights</button>
+      <button type="submit" onclick="startTimer()">Scrape Flights</button>
     </form>
 
     {% if error %}
